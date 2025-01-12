@@ -6,7 +6,7 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2024 STMicroelectronics.
+  * Copyright (c) 2025 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -23,39 +23,21 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdlib.h>
-#include <stdio.h>
-#include <string.h>
-
-
 #include "bsp/board_api.h"
 #include "tusb.h"
-#include "usb_descriptors.h"
+#include "class/hid/hid.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
-// Interface index depends on the order in configuration descriptor
-enum {
-  ITF_KEYBOARD = 0,
-  ITF_MOUSE = 1
-};
-
-/* Blink pattern
- * - 250 ms  : device not mounted
- * - 1000 ms : device mounted
- * - 2500 ms : device is suspended
- */
-enum  {
-  BLINK_NOT_MOUNTED = 250,
-  BLINK_MOUNTED = 1000,
-  BLINK_SUSPENDED = 2500,
-};
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+// English
+#define LANGUAGE_ID 0x0409
+#define BUF_COUNT   4
 
 /* USER CODE END PD */
 
@@ -67,9 +49,6 @@ enum  {
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
-static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
-
 uint16_t u16SegDispValue = 0u;
 uint8_t u8SegDispDigit = 0u;
 const uint32_t au32SegMasks[16] = { 0b01111011000000000000000000000000,
@@ -89,14 +68,25 @@ const uint32_t au32SegMasks[16] = { 0b01111011000000000000000000000000,
                                     0b01111000100000000000000000000000,
                                     0b01101000100000000000000000000000};
 
+
+tusb_desc_device_t desc_device;
+
+uint8_t buf_pool[BUF_COUNT][64];
+uint8_t buf_owner[BUF_COUNT] = { 0 }; // device address that owns buffer
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+void tusb_time_delay_ms_api(uint32_t ms){
+  const uint32_t time_ms = HAL_GetTick();
+  while ((HAL_GetTick() - time_ms) < ms) {}
+}
 void led_blinking_task(void);
-void hid_task(void);
+extern void cdc_app_task(void);
+extern void hid_app_task(void);
+
 void vSetSegDisp(uint16_t u16Value);
 void vShowSegDisp(void);
 uint32_t board_millis(){return HAL_GetTick();}
@@ -138,15 +128,22 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_USB_OTG_FS_PCD_Init();
   MX_USB_OTG_HS_HCD_Init();
+  MX_USB_OTG_FS_PCD_Init();
   /* USER CODE BEGIN 2 */
+  // init device stack on configured roothub port
+  tusb_rhport_init_t host_init = {
+    .role = TUSB_ROLE_HOST,
+    .speed = TUSB_SPEED_FULL
+  };
+  tusb_init(BOARD_TUH_RHPORT, &host_init);
+
   // init device stack on configured roothub port
   tusb_rhport_init_t dev_init = {
     .role = TUSB_ROLE_DEVICE,
     .speed = TUSB_SPEED_FULL
   };
-  tusb_init(BOARD_TUD_RHPORT, &dev_init);
+  //tusb_init(BOARD_TUD_RHPORT, &dev_init);
 
   if (board_init_after_tusb) {
     board_init_after_tusb();
@@ -159,17 +156,17 @@ int main(void)
   uint32_t u32Last = HAL_GetTick();
   while (1)
   {
-    tud_task(); // tinyusb device task
+    tuh_task(); // tinyusb device task
     led_blinking_task();
-
-    hid_task();
+    cdc_app_task();
+    hid_app_task();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    if(HAL_GetTick() - u32Last > 250){
+    /*if(HAL_GetTick() - u32Last > 250){
       u32Last = HAL_GetTick();
       vSetSegDisp(u16SegDispValue + 1);
-    }
+    }//*/
     vShowSegDisp();
   }
   /* USER CODE END 3 */
@@ -227,272 +224,17 @@ void SystemClock_Config(void)
 /* USER CODE BEGIN 4 */
 
 //--------------------------------------------------------------------+
-// Device callbacks
+// TinyUSB Callbacks
 //--------------------------------------------------------------------+
 
-// Invoked when device is mounted
-void tud_mount_cb(void)
-{
-  blink_interval_ms = BLINK_MOUNTED;
+void tuh_mount_cb(uint8_t dev_addr) {
+  // application set-up
+  printf("A device with address %d is mounted\r\n", dev_addr);
 }
 
-// Invoked when device is unmounted
-void tud_umount_cb(void)
-{
-  blink_interval_ms = BLINK_NOT_MOUNTED;
-}
-
-// Invoked when usb bus is suspended
-// remote_wakeup_en : if host allow us  to perform remote wakeup
-// Within 7ms, device must draw an average of current less than 2.5 mA from bus
-void tud_suspend_cb(bool remote_wakeup_en)
-{
-  (void) remote_wakeup_en;
-  blink_interval_ms = BLINK_SUSPENDED;
-}
-
-// Invoked when usb bus is resumed
-void tud_resume_cb(void)
-{
-  blink_interval_ms = tud_mounted() ? BLINK_MOUNTED : BLINK_NOT_MOUNTED;
-}
-
-//--------------------------------------------------------------------+
-// USB HID
-//--------------------------------------------------------------------+
-
-static void send_hid_report(uint8_t report_id, const uint32_t* btn)
-{
-  // skip if hid is not ready yet
-  if ( !tud_hid_ready() ) return;
-
-  switch(report_id)
-  {
-    case REPORT_ID_KEYBOARD:
-    {
-      // use to avoid send multiple consecutive zero report for keyboard
-      static bool has_keyboard_key = false;
-
-      if ((btn[0])&&(btn[1])){
-        uint8_t keycode[6] = { 0 };
-        if(btn[4]){
-          keycode[0] = HID_KEY_A;
-          has_keyboard_key = true;
-        }
-        if(btn[5]){
-          keycode[0] = HID_KEY_C;
-          has_keyboard_key = true;
-        }
-        if(btn[6]){
-          keycode[0] = HID_KEY_V;
-          has_keyboard_key = true;
-        }
-        if (has_keyboard_key)
-          tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keycode);
-        else
-          tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, NULL);
-      }
-      else{
-        // send empty key report if previously has key pressed
-        if (has_keyboard_key) tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, NULL);
-        has_keyboard_key = false;
-      }
-    }
-    break;
-
-    case REPORT_ID_MOUSE:
-    {
-      int8_t deltaX = 0;
-      int8_t deltaY = 0;
-      uint8_t buttons = 0x00;
-      if((btn[0])&&(!btn[1])){
-        if(btn[4]){
-          if(btn[3])
-            deltaX = 5;
-          else
-            deltaX = -5;
-        }
-        if(btn[5]){
-          if(btn[3])
-            buttons = MOUSE_BUTTON_LEFT;
-          else
-            buttons = MOUSE_BUTTON_RIGHT;
-        }
-        if(btn[6]){
-          if(btn[3])
-            deltaY = 5;
-          else
-            deltaY = -5;
-        }
-      }
-      // no button, right + down, no scroll, no pan
-      tud_hid_mouse_report(REPORT_ID_MOUSE, buttons, deltaX, 5, 0, 0);
-    }
-    break;
-
-    case REPORT_ID_CONSUMER_CONTROL:
-    {
-      // use to avoid send multiple consecutive zero report
-      static bool has_consumer_key = false;
-
-      if ((!btn[0])&&(btn[1])){
-        uint16_t action = 0;
-        if(btn[4]){
-          action = HID_USAGE_CONSUMER_MUTE;
-        }
-        if(btn[5]){
-          action = HID_USAGE_CONSUMER_VOLUME_DECREMENT;
-        }
-        if(btn[6]){
-          action = HID_USAGE_CONSUMER_VOLUME_INCREMENT;
-        }
-        has_consumer_key = action != 0;
-        tud_hid_report(REPORT_ID_CONSUMER_CONTROL, &action, 2);
-      }
-      else{
-        // send empty key report (release key) if previously has key pressed
-        uint16_t empty_key = 0;
-        if (has_consumer_key) tud_hid_report(REPORT_ID_CONSUMER_CONTROL, &empty_key, 2);
-        has_consumer_key = false;
-      }
-    }
-    break;
-
-    case REPORT_ID_GAMEPAD:
-    {
-      // use to avoid send multiple consecutive zero report for keyboard
-      static bool has_gamepad_key = false;
-
-      hid_gamepad_report_t report =
-      {
-        .x   = 0, .y = 0, .z = 0, .rz = 0, .rx = 0, .ry = 0,
-        .hat = 0, .buttons = 0
-      };
-      if ((!btn[0])&&(!btn[1])){
-        report.hat = GAMEPAD_HAT_UP;
-        report.buttons = GAMEPAD_BUTTON_A;
-        tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
-
-        has_gamepad_key = true;
-      }
-      else{
-        report.hat = GAMEPAD_HAT_CENTERED;
-        report.buttons = 0;
-        if (has_gamepad_key) tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
-        has_gamepad_key = false;
-      }
-    }
-    break;
-
-    default: break;
-  }
-}
-
-// Every 10ms, we will sent 1 report for each HID profile (keyboard, mouse etc ..)
-// tud_hid_report_complete_cb() is used to send the next report after previous one is complete
-void hid_task(void)
-{
-  // Poll every 10ms
-  const uint32_t interval_ms = 10;
-  static uint32_t start_ms = 0;
-
-  if ( board_millis() - start_ms < interval_ms) return; // not enough time
-  start_ms += interval_ms;
-
-  uint32_t const btn[8] = {
-    HAL_GPIO_ReadPin(SW0_GPIO_Port,SW0_Pin) == GPIO_PIN_RESET,
-    HAL_GPIO_ReadPin(SW1_GPIO_Port,SW1_Pin) == GPIO_PIN_RESET,
-    HAL_GPIO_ReadPin(SW2_GPIO_Port,SW2_Pin) == GPIO_PIN_RESET,
-    HAL_GPIO_ReadPin(SW3_GPIO_Port,SW3_Pin) == GPIO_PIN_RESET,
-    HAL_GPIO_ReadPin(BT0_GPIO_Port,BT0_Pin) == GPIO_PIN_RESET,
-    HAL_GPIO_ReadPin(BT1_GPIO_Port,BT1_Pin) == GPIO_PIN_RESET,
-    HAL_GPIO_ReadPin(BT2_GPIO_Port,BT2_Pin) == GPIO_PIN_RESET,
-    HAL_GPIO_ReadPin(K1_GPIO_Port,K1_Pin) == GPIO_PIN_SET
-  };
-
-  // Remote wakeup
-  if (tud_suspended() && btn[7])
-  {
-    // Wake up host if we are in suspend mode
-    // and REMOTE_WAKEUP feature is enabled by host
-    tud_remote_wakeup();
-  }else
-  {
-    // Send the 1st of report chain, the rest will be sent by tud_hid_report_complete_cb()
-    send_hid_report(REPORT_ID_KEYBOARD, btn);
-  }
-}
-
-// Invoked when sent REPORT successfully to host
-// Application can use this to send the next report
-// Note: For composite reports, report[0] is report ID
-void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len)
-{
-  (void) instance;
-  (void) len;
-
-  uint8_t next_report_id = report[0] + 1u;
-
-  if (next_report_id < REPORT_ID_COUNT)
-  {
-    uint32_t const btn[8] = {
-      HAL_GPIO_ReadPin(SW0_GPIO_Port,SW0_Pin) == GPIO_PIN_RESET,
-      HAL_GPIO_ReadPin(SW1_GPIO_Port,SW1_Pin) == GPIO_PIN_RESET,
-      HAL_GPIO_ReadPin(SW2_GPIO_Port,SW2_Pin) == GPIO_PIN_RESET,
-      HAL_GPIO_ReadPin(SW3_GPIO_Port,SW3_Pin) == GPIO_PIN_RESET,
-      HAL_GPIO_ReadPin(BT0_GPIO_Port,BT0_Pin) == GPIO_PIN_RESET,
-      HAL_GPIO_ReadPin(BT1_GPIO_Port,BT1_Pin) == GPIO_PIN_RESET,
-      HAL_GPIO_ReadPin(BT2_GPIO_Port,BT2_Pin) == GPIO_PIN_RESET,
-      HAL_GPIO_ReadPin(K1_GPIO_Port,K1_Pin) == GPIO_PIN_SET
-    };
-    send_hid_report(next_report_id, btn);
-  }
-}
-
-// Invoked when received GET_REPORT control request
-// Application must fill buffer report's content and return its length.
-// Return zero will cause the stack to STALL request
-uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t* buffer, uint16_t reqlen)
-{
-  // TODO not Implemented
-  (void) instance;
-  (void) report_id;
-  (void) report_type;
-  (void) buffer;
-  (void) reqlen;
-
-  return 0;
-}
-
-// Invoked when received SET_REPORT control request or
-// received data on OUT endpoint ( Report ID = 0, Type = 0 )
-void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
-{
-  (void) instance;
-
-  if (report_type == HID_REPORT_TYPE_OUTPUT)
-  {
-    // Set keyboard LED e.g Capslock, Numlock etc...
-    if (report_id == REPORT_ID_KEYBOARD)
-    {
-      // bufsize should be (at least) 1
-      if ( bufsize < 1 ) return;
-
-      uint8_t const kbd_leds = buffer[0];
-
-      if (kbd_leds & KEYBOARD_LED_CAPSLOCK)
-      {
-        // Capslock On: disable blink, turn led on
-        blink_interval_ms = 0;
-        board_led_write(true);
-      }else
-      {
-        // Caplocks Off: back to normal blink
-        board_led_write(false);
-        blink_interval_ms = BLINK_MOUNTED;
-      }
-    }
-  }
+void tuh_umount_cb(uint8_t dev_addr) {
+  // application tear-down
+  printf("A device with address %d is unmounted \r\n", dev_addr);
 }
 
 //--------------------------------------------------------------------+
@@ -504,8 +246,8 @@ void led_blinking_task(void)
   static bool led_state = false;
 
   // Blink every interval ms
-  if ( board_millis() - start_ms < blink_interval_ms) return; // not enough time
-  start_ms += blink_interval_ms;
+  if ( board_millis() - start_ms < 1000) return; // not enough time
+  start_ms += 1000;
 
   board_led_write(led_state);
   led_state = 1 - led_state; // toggle
@@ -522,6 +264,23 @@ void led_blinking_task(void)
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+void vAlterSegDisp(uint16_t u16Reset, uint16_t u16Set){
+  u16SegDispValue &= ~u16Reset;
+  u16SegDispValue |= u16Set;
+}
 void vSetSegDisp(uint16_t u16Value)
 {
   u16SegDispValue = u16Value;

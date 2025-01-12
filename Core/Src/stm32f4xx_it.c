@@ -6,7 +6,7 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2024 STMicroelectronics.
+  * Copyright (c) 2025 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "tusb.h"
+#include "tusb_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -223,9 +224,8 @@ void TIM1_UP_TIM10_IRQHandler(void)
 void OTG_FS_IRQHandler(void)
 {
   /* USER CODE BEGIN OTG_FS_IRQn 0 */
-  tud_int_handler(0);
+  tud_int_handler(BOARD_TUD_RHPORT);
   return;
-
   /* USER CODE END OTG_FS_IRQn 0 */
   HAL_PCD_IRQHandler(&hpcd_USB_OTG_FS);
   /* USER CODE BEGIN OTG_FS_IRQn 1 */
@@ -239,6 +239,8 @@ void OTG_FS_IRQHandler(void)
 void OTG_HS_IRQHandler(void)
 {
   /* USER CODE BEGIN OTG_HS_IRQn 0 */
+  tuh_int_handler(BOARD_TUH_RHPORT);
+  return;
 
   /* USER CODE END OTG_HS_IRQn 0 */
   HAL_HCD_IRQHandler(&hhcd_USB_OTG_HS);

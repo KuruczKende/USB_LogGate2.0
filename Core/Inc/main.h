@@ -7,7 +7,7 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2024 STMicroelectronics.
+  * Copyright (c) 2025 STMicroelectronics.
   * All rights reserved.
   *
   * This software is licensed under terms that can be found in the LICENSE file
@@ -105,6 +105,8 @@ void Error_Handler(void);
 /* USER CODE BEGIN Private defines */
 #define K1_Pin WK_UP_Pin
 #define K1_GPIO_Port WK_UP_GPIO_Port
+
+void vAlterSegDisp(uint16_t u16Reset, uint16_t u16Set);
 
 /* USER CODE END Private defines */
 
